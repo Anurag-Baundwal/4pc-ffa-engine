@@ -46,7 +46,10 @@ Value terminal_value(const Position& pos, Color root) {
 
 Value evaluate(const Position& pos, Color root) {
     if (pos.game_over()) return terminal_value(pos, root);
-    Value v = standing(pos, root);
+    int others = 0;
+    for (int c = 0; c < COLOR_NB; ++c)
+        if (c != root) others += standing(pos, Color(c));
+    Value v = standing(pos, root) - others / 3;
     if (!pos.is_alive(root)) v -= EParams.eliminatedPenalty;
     return v;
 }
