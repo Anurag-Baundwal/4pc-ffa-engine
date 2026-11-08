@@ -12,7 +12,7 @@ server.
 | `src/FastUint256.h`, `src/bitboard.*` | 256-bit bitboards on a padded 16x16 grid and slider attacks, taken from stockfish_4pc (`nnue` branch) |
 | `src/types.h` | squares, pieces, moves, player states |
 | `src/position.*` | FFA rules: move generation, legality, `do_move` with every consequence, FEN4, game end |
-| `src/eval.*` | evaluation: the root player's points and material |
+| `src/eval.*` | evaluation: the root player's points and material, minus the opponents' mean |
 | `src/search.*` | iterative deepening and plain alpha-beta, paranoid model (every opponent minimizes the root player's score) |
 | `src/uci.*` | UCI-like protocol plus `legalmoves`, `gamestate`, `d`, `resignwins` and PGN4 replay |
 | `src/pgn4.*` | chess.com PGN4 move tokens and their replay (shared by the audit and the protocol) |

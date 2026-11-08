@@ -20,9 +20,9 @@ struct EvalParams {
 
 extern EvalParams EParams;
 
-// Score of the position for player `root`, in centipawns: root's standing, pointValue * points + material
-// (material only while root is alive; an eliminated root also gets eliminatedPenalty). The other players'
-// standings don't count.
+// Score of the position for player `root`, in centipawns: root's standing minus the mean of the three
+// other players' standings. A standing is pointValue * points + material (material only while that player
+// is alive); an eliminated root also gets eliminatedPenalty.
 Value evaluate(const Position& pos, Color root);
 
 // Value of a finished game for `root`, from the final placements (ties shared), plus a small points term.
