@@ -16,6 +16,7 @@
 #include "bitboard.h"
 #include "position.h"
 #include "search.h"
+#include "tt.h"
 #include "uci.h"
 
 namespace FFA {
@@ -70,6 +71,7 @@ static int run_bench(int depth) {
         ",8,x,x,x/bR,3,bP,9/bN,8,dgP,4/12,gK,1/4,dgR,6,dgB,2/1,bK,9,bD,2/bR,1,bP,8,dgP,2/4,rP,1,rP,3,dgP,2,dgN/2,bQ,3,r"
         "P,1,rP,1,dgR,3/x,x,x,2,rN,5,x,x,x/x,x,x,2,rP,2,rK,1,rP,x,x,x/x,x,x,3,rB,3,rR,x,x,x",
     };
+    TT.resize(16);
     uint64_t total = 0;
     auto     t0 = std::chrono::steady_clock::now();
     for (const char* f : fens) {

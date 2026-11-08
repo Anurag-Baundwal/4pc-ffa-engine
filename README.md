@@ -57,8 +57,7 @@ The protocol follows UCI:
   player per token.
 - `go rtime/btime/ytime/gtime/rinc/... | nodes | depth | movetime`. The answer is `bestmove <move>`, or
   `bestmove resign` when resigning now leaves the engine strictly first (chess.com's "claim win").
-- Options: `MoveOverhead` (ms kept in reserve per move). `Hash` is accepted but unused (no transposition
-  table yet).
+- Options: `Hash` (MB, default 16), `MoveOverhead` (ms kept in reserve per move).
 - Extra commands:
   - `legalmoves`
   - `gamestate`, which prints turn, status, points and whether the game is over

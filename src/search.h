@@ -1,8 +1,9 @@
 /*
   4PC FFA engine - search: alpha-beta with iterative deepening, paranoid model (the root player maximizes
-  its score, every opponent minimizes it). Move ordering: the previous iteration's best move first at the
-  root, then captures and promotions by MVV-LVA, then quiet moves in generation order. At depth 0 a
-  root-centric quiescence search resolves captures (see qsearch).
+  its score, every opponent minimizes it). A transposition table stores bounds and best moves. Move
+  ordering: the transposition table's move first (at the root, the previous iteration's best move), then
+  captures and promotions by MVV-LVA, then quiet moves in generation order. At depth 0 a root-centric
+  quiescence search resolves captures (see qsearch).
 */
 
 #ifndef SEARCH_H_INCLUDED
@@ -46,7 +47,7 @@ struct SearchResult {
 // if `verbose`. Returns when a limit is reached or `stop` becomes true.
 SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<bool>& stop, bool verbose);
 
-void search_clear();  // new game: forget what earlier searches learned (nothing yet)
+void search_clear();  // new game: forget the transposition table
 
 // Writes one line to stdout and flushes it, under a lock. The search thread and the protocol thread both
 // print, and std::cout is not thread-safe: two unsynchronized flushes once wrote "bestmove" twice, and the
