@@ -149,22 +149,34 @@ struct Searcher {
         Value      stand   = evaluate(pos, root);
         Value      best;
         if (!inCheck) {
-            // Stand pat: every player may decline to capture.
+            // Stand pat: every player may decline to capture. An opponent that declines passes the turn to
+            // the next opponent, so the captures of all three opponents are seen; the line ends when the
+            // turn would come back to the root player (or at the qsearch ply limit).
             best = stand;
-            if (maxNode) {
-                if (stand >= beta) return stand;
-                alpha = std::max(alpha, stand);
-            } else {
-                if (stand <= alpha) return stand;
-                beta = std::min(beta, stand);
+            if (!maxNode && qply + 1 < SOpts.qsMaxPly && ply < MAX_PLY - 2) {
+                Position child = pos;
+                child.do_pass();
+                while (!child.game_over() && child.side_to_move() != root && !child.is_alive(child.side_to_move()))
+                    child.do_pass();  // zombies' turns are passes too
+                if (!child.game_over() && child.side_to_move() != root) {
+                    best = qsearch(child, ply + 1, alpha, beta, qply + 1);
+                    if (stopped) return 0;
+                }
             }
-            if (qply >= SOpts.qsMaxPly || ply >= MAX_PLY - 1) return stand;
+            if (maxNode) {
+                if (best >= beta) return best;
+                alpha = std::max(alpha, best);
+            } else {
+                if (best <= alpha) return best;
+                beta = std::min(beta, best);
+            }
+            if (qply >= SOpts.qsMaxPly || ply >= MAX_PLY - 1) return best;
         } else
             best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
 
         ScoredMove moves[MAX_MOVES];
         int        n = ordered_moves(pos, moves, !inCheck, Move::none());
-        if (n == 0) return stand;
+        if (n == 0) return inCheck ? stand : best;
         for (int i = 0; i < n; ++i) {
             const Move m = moves[i].m;
             if (!inCheck) {
