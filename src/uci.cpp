@@ -37,6 +37,7 @@
 #include "eval.h"
 #include "pgn4.h"
 #include "search.h"
+#include "tt.h"
 
 namespace FFA {
 
@@ -93,6 +94,7 @@ Game              G;
 NativeThread      SearchThread;
 std::atomic<bool> StopFlag{false};
 bool              Searching = false;
+int               HashMB = 16;
 
 void wait_search() {
     if (SearchThread.joinable()) SearchThread.join();
@@ -272,7 +274,8 @@ static void cmd_setoption(std::istringstream& is) {
     while (is >> tok && tok != "value") name += (name.empty() ? "" : " ") + tok;
     while (is >> tok) value += (value.empty() ? "" : " ") + tok;
     if (name == "Hash") {
-        // Accepted for match runners and GUIs that always send it; there is no transposition table yet.
+        HashMB = std::max(1, std::atoi(value.c_str()));
+        TT.resize(HashMB);
     } else if (name == "MoveOverhead")
         SOpts.moveOverhead = std::atoi(value.c_str());
     else
@@ -280,6 +283,7 @@ static void cmd_setoption(std::istringstream& is) {
 }
 
 void uci_loop() {
+    TT.resize(HashMB);
     G.reset([] {
         Position p;
         p.set_startpos();

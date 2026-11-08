@@ -44,7 +44,7 @@ EXE    ?= ffa_engine
 TARGET  = $(EXE:$(SUFFIX)=)$(SUFFIX)
 LDFLAGS   = -O3 $(ARCH) $(LDSYS) $(EXTRALDFLAGS)
 
-SRCS = src/bitboard.cpp src/position.cpp src/pgn4.cpp src/eval.cpp src/search.cpp src/uci.cpp src/audit.cpp src/main.cpp
+SRCS = src/bitboard.cpp src/position.cpp src/pgn4.cpp src/eval.cpp src/search.cpp src/tt.cpp src/uci.cpp src/audit.cpp src/main.cpp
 OBJS = $(SRCS:src/%.cpp=build/%.o)
 DOBJS = $(SRCS:src/%.cpp=build/debug/%.o)
 
