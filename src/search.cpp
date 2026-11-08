@@ -43,6 +43,7 @@ struct Searcher {
     Clock::time_point  start;
     int64_t            hardMs = 0;
     bool               stopped = false;
+    Move               killers[MAX_PLY + 8][2] = {};  // two quiet moves per ply that caused cutoffs
     std::vector<Key>   keys;  // board keys of the game so far and of the searched path
     Move               rootBest = Move::none();
     Value              rootScore = 0;
@@ -82,22 +83,33 @@ struct Searcher {
 
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Quiet moves keep their generation order.
-    int score_move(const Position& pos, Move m, Move first) const {
+    // Then the ply's two killer moves; the other quiet moves keep their generation order.
+    int score_move(const Position& pos, Move m, Move first, int ply) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
             int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
             return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
         }
+        if (ply < MAX_PLY && m == killers[ply][0]) return 9000000;
+        if (ply < MAX_PLY && m == killers[ply][1]) return 8999999;
         return 0;
     }
 
-    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
+    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first, int ply) const {
         Move list[MAX_MOVES];
         int  n = capturesOnly ? pos.generate_captures(list) : pos.generate_legal(list);
-        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
+        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first, ply)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
+    }
+
+    // A quiet move caused a cutoff: it becomes the ply's first killer (the old first one moves to second).
+    void update_killers(const Position& pos, Move m, int ply) {
+        if (pos.is_capture(m) || m.is_promotion() || ply >= MAX_PLY) return;
+        if (killers[ply][0] != m) {
+            killers[ply][1] = killers[ply][0];
+            killers[ply][0] = m;
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -163,7 +175,7 @@ struct Searcher {
             best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, !inCheck, Move::none());
+        int        n = ordered_moves(pos, moves, !inCheck, Move::none(), ply);
         if (n == 0) return stand;
         for (int i = 0; i < n; ++i) {
             const Move m = moves[i].m;
@@ -223,7 +235,7 @@ struct Searcher {
         }
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none());
+        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none(), ply);
         if (n == 0) return evaluate(pos, root);
 
         const bool maxNode = us == root;
@@ -247,7 +259,10 @@ struct Searcher {
                 alpha = std::max(alpha, v);
             else
                 beta = std::min(beta, v);
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                update_killers(pos, m, ply);
+                break;
+            }
         }
         return best;
     }

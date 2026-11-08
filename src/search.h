@@ -1,7 +1,8 @@
 /*
   4PC FFA engine - search: alpha-beta with iterative deepening, paranoid model (the root player maximizes
   its score, every opponent minimizes it). Move ordering: the previous iteration's best move first at the
-  root, then captures and promotions by MVV-LVA, then quiet moves in generation order. At depth 0 a
+  root, then captures and promotions by MVV-LVA, then the ply's two killer moves, then the other quiet moves
+  in generation order. At depth 0 a
   root-centric quiescence search resolves captures (see qsearch).
 */
 
