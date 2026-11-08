@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
+// another caused a cutoff. Kept between searches; cleared by search_clear().
+int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
+
 struct ScoredMove {
     Move m;
     int  score;
@@ -43,6 +48,7 @@ struct Searcher {
     Clock::time_point  start;
     int64_t            hardMs = 0;
     bool               stopped = false;
+    Move               killers[MAX_PLY + 8][2] = {};  // two quiet moves per ply that caused cutoffs
     std::vector<Key>   keys;  // board keys of the game so far and of the searched path
     Move               rootBest = Move::none();
     Value              rootScore = 0;
@@ -82,22 +88,40 @@ struct Searcher {
 
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Quiet moves keep their generation order.
-    int score_move(const Position& pos, Move m, Move first) const {
+    // Then the ply's two killer moves, then the other quiet moves by history.
+    int score_move(const Position& pos, Move m, Move first, int ply) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
             int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
             return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
         }
-        return 0;
+        if (ply < MAX_PLY && m == killers[ply][0]) return 9000000;
+        if (ply < MAX_PLY && m == killers[ply][1]) return 8999999;
+        return History[pos.side_to_move()][m.from_sq()][m.to_sq()];
     }
 
-    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
+    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first, int ply) const {
         Move list[MAX_MOVES];
         int  n = capturesOnly ? pos.generate_captures(list) : pos.generate_legal(list);
-        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
+        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first, ply)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
+    }
+
+    // A quiet move caused a cutoff: it becomes the ply's first killer and its history grows by depth^2
+    // (all history is halved when an entry passes 1,000,000).
+    void update_quiet(const Position& pos, Move m, int depth, int ply) {
+        if (pos.is_capture(m) || m.is_promotion()) return;
+        if (ply < MAX_PLY && killers[ply][0] != m) {
+            killers[ply][1] = killers[ply][0];
+            killers[ply][0] = m;
+        }
+        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+        h += depth * depth;
+        if (h > 1000000)
+            for (auto& a : History)
+                for (auto& b : a)
+                    for (auto& x : b) x /= 2;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -163,7 +187,7 @@ struct Searcher {
             best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, !inCheck, Move::none());
+        int        n = ordered_moves(pos, moves, !inCheck, Move::none(), ply);
         if (n == 0) return stand;
         for (int i = 0; i < n; ++i) {
             const Move m = moves[i].m;
@@ -223,7 +247,7 @@ struct Searcher {
         }
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none());
+        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none(), ply);
         if (n == 0) return evaluate(pos, root);
 
         const bool maxNode = us == root;
@@ -247,7 +271,10 @@ struct Searcher {
                 alpha = std::max(alpha, v);
             else
                 beta = std::min(beta, v);
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                update_quiet(pos, m, depth, ply);
+                break;
+            }
         }
         return best;
     }
@@ -255,7 +282,7 @@ struct Searcher {
 
 }  // namespace
 
-void search_clear() {}
+void search_clear() { std::memset(History, 0, sizeof(History)); }
 
 SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<bool>& stop, bool verbose) {
     SearchResult    res;
