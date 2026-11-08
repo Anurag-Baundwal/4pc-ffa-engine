@@ -1,0 +1,9 @@
+build/
+*.exe
+*.o
+*.d
+tests/results/*.jsonl
+__pycache__/
+chesscom/api_key*.txt
+chesscom/server_dump.txt
+chesscom/__pycache__/
