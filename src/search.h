@@ -1,8 +1,7 @@
 /*
-  4PC FFA engine - search: plain alpha-beta with iterative deepening, paranoid model (the root player
-  maximizes its score, every opponent minimizes it). Moves are searched in generation order, except that the
-  previous iteration's best move goes first at the root. No transposition table, move ordering heuristics,
-  quiescence search or pruning: each of those is added (or not) by a tested change.
+  4PC FFA engine - search: alpha-beta with iterative deepening, paranoid model (the root player maximizes
+  its score, every opponent minimizes it). Move ordering: the previous iteration's best move first at the
+  root, then captures and promotions by MVV-LVA, then quiet moves in generation order.
 */
 
 #ifndef SEARCH_H_INCLUDED

@@ -31,6 +31,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+struct ScoredMove {
+    Move m;
+    int  score;
+};
+
 struct Searcher {
     Color              root;
     std::atomic<bool>* stopFlag;
@@ -55,6 +60,49 @@ struct Searcher {
         if (nodeLimit && nodes >= nodeLimit) stopped = true;
         return stopped;
     }
+
+    // ---------------------------------------------------------------------------------------------
+    //  Move ordering
+    // ---------------------------------------------------------------------------------------------
+
+    // What a capture or promotion is worth to the evaluation: the points for the capture plus the material
+    // of an alive player's piece (a king capture counts 20000), and the promotion gain.
+    int victim_gain(const Position& pos, Move m) const {
+        Square to = m.to_sq();
+        int    g  = 0;
+        if (!pos.empty(to)) {
+            Piece v = pos.piece_on(to);
+            g += EParams.pointValue * pos.capture_value(to);
+            if (pos.is_alive(color_of(v))) g += type_of(v) == KING ? 20000 : EParams.material[type_of(v)];
+        }
+        if (m.type_of() == EN_PASSANT) g += EParams.pointValue + EParams.material[PAWN];
+        if (m.is_promotion()) g += EParams.material[QUEEN] - EParams.material[PAWN];
+        return g;
+    }
+
+    // The move searched first (the previous iteration's best at the root), then captures and promotions by
+    // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
+    // Quiet moves keep their generation order.
+    int score_move(const Position& pos, Move m, Move first) const {
+        if (m == first) return 100000000;
+        if (pos.is_capture(m) || m.is_promotion()) {
+            int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
+            return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
+        }
+        return 0;
+    }
+
+    int ordered_moves(const Position& pos, ScoredMove* out, Move first) const {
+        Move list[MAX_MOVES];
+        int  n = pos.generate_legal(list);
+        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
+        std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
+        return n;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  Helpers
+    // ---------------------------------------------------------------------------------------------
 
     bool is_repetition(const Position& pos) const {
         Key k = pos.board_key();
@@ -100,21 +148,16 @@ struct Searcher {
             return v;
         }
 
-        Move moves[MAX_MOVES];
-        int  n = pos.generate_legal(moves);
+        ScoredMove moves[MAX_MOVES];
+        int        n = ordered_moves(pos, moves, ply == 0 ? rootBest : Move::none());
         if (n == 0) return evaluate(pos, root);
-        if (ply == 0 && rootBest)
-            for (int i = 1; i < n; ++i)
-                if (moves[i] == rootBest) {
-                    std::swap(moves[0], moves[i]);
-                    break;
-                }
 
         const bool maxNode = us == root;
         Value      best    = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
         for (int i = 0; i < n; ++i) {
-            Position child = pos;
-            child.do_move(moves[i]);
+            const Move m     = moves[i].m;
+            Position   child = pos;
+            child.do_move(m);
             keys.push_back(child.board_key());
             Value v = search(child, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
@@ -122,7 +165,7 @@ struct Searcher {
             if (maxNode ? v > best : v < best) {
                 best = v;
                 if (ply == 0) {
-                    rootBest  = moves[i];
+                    rootBest  = m;
                     rootScore = v;
                 }
             }
