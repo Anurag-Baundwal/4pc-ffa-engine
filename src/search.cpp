@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,10 @@ void sync_print(const std::string& line) {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
+// another caused a cutoff. Kept between searches; cleared by search_clear().
+int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
 
 struct ScoredMove {
     Move m;
@@ -82,14 +87,14 @@ struct Searcher {
 
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Quiet moves keep their generation order.
+    // Then the quiet moves by history.
     int score_move(const Position& pos, Move m, Move first) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
             int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
             return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
         }
-        return 0;
+        return History[pos.side_to_move()][m.from_sq()][m.to_sq()];
     }
 
     int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
@@ -98,6 +103,18 @@ struct Searcher {
         for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
+    }
+
+    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
+    // passes 1,000,000).
+    void update_quiet(const Position& pos, Move m, int depth) {
+        if (pos.is_capture(m) || m.is_promotion()) return;
+        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+        h += depth * depth;
+        if (h > 1000000)
+            for (auto& a : History)
+                for (auto& b : a)
+                    for (auto& x : b) x /= 2;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -247,7 +264,10 @@ struct Searcher {
                 alpha = std::max(alpha, v);
             else
                 beta = std::min(beta, v);
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                update_quiet(pos, m, depth);
+                break;
+            }
         }
         return best;
     }
@@ -255,7 +275,7 @@ struct Searcher {
 
 }  // namespace
 
-void search_clear() {}
+void search_clear() { std::memset(History, 0, sizeof(History)); }
 
 SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<bool>& stop, bool verbose) {
     SearchResult    res;
