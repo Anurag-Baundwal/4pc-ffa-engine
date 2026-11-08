@@ -92,9 +92,9 @@ struct Searcher {
         return 0;
     }
 
-    int ordered_moves(const Position& pos, ScoredMove* out, Move first) const {
+    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
         Move list[MAX_MOVES];
-        int  n = pos.generate_legal(list);
+        int  n = capturesOnly ? pos.generate_captures(list) : pos.generate_legal(list);
         for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
@@ -128,15 +128,89 @@ struct Searcher {
         return true;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    //  Quiescence: one player per ply, captures (and promotions); evasions near the horizon.
+    // ---------------------------------------------------------------------------------------------
+
+    Value qsearch(const Position& pos, int ply, Value alpha, Value beta, int qply) {
+        nodes++;
+        if (check_stop()) return 0;
+        if (pos.game_over()) return terminal_value(pos, root);
+        if (Value cv; claim_value(pos, cv)) return cv;
+        const Color us = pos.side_to_move();
+        if (!pos.is_alive(us)) {  // a zombie's turn: a pass
+            if (qply >= SOpts.qsMaxPly) return evaluate(pos, root);
+            Position child = pos;
+            child.do_pass();
+            return qsearch(child, ply + 1, alpha, beta, qply + 1);
+        }
+        const bool maxNode = us == root;
+        const bool inCheck = pos.in_check(us) && qply < SOpts.qsCheckPly;
+        Value      stand   = evaluate(pos, root);
+        Value      best;
+        if (!inCheck) {
+            // Stand pat: every player may decline to capture.
+            best = stand;
+            if (maxNode) {
+                if (stand >= beta) return stand;
+                alpha = std::max(alpha, stand);
+            } else {
+                if (stand <= alpha) return stand;
+                beta = std::min(beta, stand);
+            }
+            if (qply >= SOpts.qsMaxPly || ply >= MAX_PLY - 1) return stand;
+        } else
+            best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
+
+        ScoredMove moves[MAX_MOVES];
+        int        n = ordered_moves(pos, moves, !inCheck, Move::none());
+        if (n == 0) return stand;
+        for (int i = 0; i < n; ++i) {
+            const Move m = moves[i].m;
+            if (!inCheck) {
+                // Root-centric quiescence: the root player's captures, and the opponents' captures of the
+                // root player's pieces (or of a king). Opponents trading among themselves barely changes
+                // the root's score. Delta pruning on top.
+                Square to      = m.to_sq();
+                Piece  victim  = pos.piece_on(to);
+                bool   kingCap = victim != NO_PIECE && type_of(victim) == KING;
+                int    gain    = victim_gain(pos, m);
+                if (maxNode) {
+                    if (!kingCap && stand + gain + 200 <= alpha) continue;
+                } else {
+                    bool hitsRoot = victim != NO_PIECE && color_of(victim) == root;
+                    if (m.type_of() == EN_PASSANT)
+                        for (int c = 0; c < COLOR_NB; ++c)
+                            if (pos.ep_square(Color(c)) == to && c == root) hitsRoot = true;
+                    if (!hitsRoot && !kingCap) continue;
+                    if (!kingCap && stand - gain - 200 >= beta) continue;
+                }
+            }
+            Position child = pos;
+            child.do_move(m);
+            Value v = qsearch(child, ply + 1, alpha, beta, qply + 1);
+            if (stopped) return 0;
+            if (maxNode) {
+                if (v > best) best = v;
+                if (v > alpha) alpha = v;
+            } else {
+                if (v < best) best = v;
+                if (v < beta) beta = v;
+            }
+            if (alpha >= beta) break;
+        }
+        return best;
+    }
+
     // Alpha-beta, paranoid: the root player's turns maximize, every opponent's turn minimizes. A zombie's
-    // turn (chess.com moves its king at random) is a pass. At depth 0 the position is evaluated as it is.
+    // turn (chess.com moves its king at random) is a pass. At depth 0 the quiescence search takes over.
     Value search(const Position& pos, int depth, int ply, Value alpha, Value beta) {
         if (pos.game_over()) return terminal_value(pos, root);
         if (Value cv; claim_value(pos, cv)) return cv;
         if (ply > 0 && is_repetition(pos)) return draw_value(pos);
+        if (depth <= 0 || ply >= MAX_PLY - 1) return qsearch(pos, ply, alpha, beta, 0);
         nodes++;
         if (check_stop()) return 0;
-        if (depth <= 0 || ply >= MAX_PLY - 1) return evaluate(pos, root);
 
         const Color us = pos.side_to_move();
         if (!pos.is_alive(us)) {
@@ -149,7 +223,7 @@ struct Searcher {
         }
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, ply == 0 ? rootBest : Move::none());
+        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none());
         if (n == 0) return evaluate(pos, root);
 
         const bool maxNode = us == root;
