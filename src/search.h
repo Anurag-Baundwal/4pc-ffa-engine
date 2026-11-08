@@ -27,6 +27,7 @@ struct SearchOptions {
     int        moveOverhead = 30;  // ms kept in reserve per move
     int        qsMaxPly     = 8;   // quiescence plies
     int        qsCheckPly   = 2;   // quiescence plies in which check evasions are searched
+    int        qsPassPly    = 4;   // quiescence plies in which an opponent without a capture passes
 };
 
 extern SearchOptions SOpts;
