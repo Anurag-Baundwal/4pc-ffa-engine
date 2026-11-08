@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,10 @@ bool parse_mode(const std::string& s, SearchMode& m) {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
+// another caused a cutoff. Kept between searches; cleared by search_clear().
+int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
 
 struct ScoredMove {
     Move m;
@@ -91,14 +96,14 @@ struct Searcher {
 
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Quiet moves keep their generation order.
+    // Then the quiet moves by history.
     int score_move(const Position& pos, Move m, Move first) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
             int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
             return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
         }
-        return 0;
+        return History[pos.side_to_move()][m.from_sq()][m.to_sq()];
     }
 
     int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
@@ -110,14 +115,14 @@ struct Searcher {
     }
 
     // Best move by move ordering (BMOM), for the opponents that BRS+ doesn't search: the best capture or
-    // promotion that doesn't give up more than it wins, else the first quiet move in generation order (there
-    // is no TT or history to rank quiet moves yet).
+    // promotion that doesn't give up more than it wins, else the quiet move with the best history (the first
+    // one in generation order on ties).
     Move bmom(const Position& pos) const {
         Move list[MAX_MOVES];
         int  n = pos.generate_legal(list);
         if (n == 0) return Move::none();
-        Move bestCap = Move::none(), firstQuiet = Move::none();
-        int  bestCapScore = INT32_MIN;
+        Move bestCap = Move::none(), bestQuiet = Move::none();
+        int  bestCapScore = INT32_MIN, bestQuietScore = INT32_MIN;
         for (int i = 0; i < n; ++i) {
             Move m = list[i];
             if (pos.is_capture(m) || m.is_promotion()) {
@@ -125,10 +130,24 @@ struct Searcher {
                 int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
                 int s        = gain - attacker / 8;
                 if (gain + 50 >= attacker && s > bestCapScore) bestCapScore = s, bestCap = m;
-            } else if (!firstQuiet)
-                firstQuiet = m;
+            } else {
+                int s = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+                if (s > bestQuietScore) bestQuietScore = s, bestQuiet = m;
+            }
         }
-        return bestCap ? bestCap : firstQuiet ? firstQuiet : list[0];
+        return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
+    }
+
+    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
+    // passes 1,000,000).
+    void update_quiet(const Position& pos, Move m, int depth) {
+        if (pos.is_capture(m) || m.is_promotion()) return;
+        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+        h += depth * depth;
+        if (h > 1000000)
+            for (auto& a : History)
+                for (auto& b : a)
+                    for (auto& x : b) x /= 2;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -301,7 +320,10 @@ struct Searcher {
                 alpha = std::max(alpha, v);
             else
                 beta = std::min(beta, v);
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                update_quiet(pos, m, depth);
+                break;
+            }
         }
         return best;
     }
@@ -342,7 +364,10 @@ struct Searcher {
                 if (stopped) return 0;
                 best = std::min(best, v);
                 beta = std::min(beta, v);
-                if (alpha >= beta) return best;
+                if (alpha >= beta) {
+                    update_quiet(cur, moves[i].m, depth);
+                    return best;
+                }
             }
             Move b = bmom(cur);
             if (!b) break;
@@ -360,7 +385,7 @@ struct Searcher {
 
 }  // namespace
 
-void search_clear() {}
+void search_clear() { std::memset(History, 0, sizeof(History)); }
 
 SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<bool>& stop, bool verbose) {
     SearchResult    res;
