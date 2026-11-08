@@ -1,7 +1,8 @@
 /*
   4PC FFA engine - search: alpha-beta with iterative deepening, paranoid model (the root player maximizes
   its score, every opponent minimizes it). Move ordering: the previous iteration's best move first at the
-  root, then captures and promotions by MVV-LVA, then quiet moves in generation order.
+  root, then captures and promotions by MVV-LVA, then quiet moves in generation order. At depth 0 a
+  root-centric quiescence search resolves captures (see qsearch).
 */
 
 #ifndef SEARCH_H_INCLUDED
@@ -17,6 +18,8 @@ namespace FFA {
 
 struct SearchOptions {
     int moveOverhead = 30;  // ms kept in reserve per move
+    int qsMaxPly     = 8;   // quiescence plies
+    int qsCheckPly   = 2;   // quiescence plies in which check evasions are searched
 };
 
 extern SearchOptions SOpts;
