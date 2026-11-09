@@ -94,6 +94,54 @@ struct Searcher {
         return g;
     }
 
+    // Static exchange evaluation (stockfish_4pc's see_ge, there between the two teams): does the exchange
+    // that m starts on its destination win at least threshold material for the mover's side? Root-centric
+    // like the quiescence search: the root player on one side, the alive opponents together on the other,
+    // each side recapturing with its least valuable attacker. A king capture always passes; en passant,
+    // promotions and castling count as 0; pins are ignored. Material values (P 100 ... Q 950).
+    bool see_ge(const Position& pos, Move m, int threshold) const {
+        if (m.type_of() != NORMAL) return 0 >= threshold;
+        const Square from = m.from_sq(), to = m.to_sq();
+        const Piece  pc = pos.piece_on(from), target = pos.piece_on(to);
+        if (target != NO_PIECE && type_of(target) == KING) return true;
+        Bitboard opps = Bitboard::zero();
+        for (int c = 0; c < COLOR_NB; ++c)
+            if (c != root && pos.is_alive(Color(c))) opps |= pos.pieces(Color(c));
+        const Bitboard roots   = pos.is_alive(root) ? pos.pieces(root) : Bitboard::zero();
+        const bool     rootMv  = color_of(pc) == root;
+        const Bitboard side[2] = {rootMv ? roots : opps, rootMv ? opps : roots};  // [0] = the mover's side
+        int victim = target != NO_PIECE && pos.is_alive(color_of(target)) ? EParams.material[type_of(target)] : 0;
+        int swap   = victim - threshold;
+        if (swap < 0) return false;
+        swap = EParams.material[type_of(pc)] - swap;
+        if (swap <= 0) return true;
+        Bitboard       occupied  = pos.pieces() ^ from ^ to;
+        Bitboard       attackers = pos.attackers_to(to, occupied);
+        const Bitboard bq = pos.pieces(BISHOP) | pos.pieces(QUEEN), rq = pos.pieces(ROOK) | pos.pieces(QUEEN);
+        int            stm = 0, res = 1;
+        while (true) {
+            stm ^= 1;
+            attackers &= occupied;
+            const Bitboard stmAttackers = attackers & side[stm];
+            if (!stmAttackers) break;
+            res ^= 1;
+            PieceType pt = PAWN;
+            Bitboard  bb = stmAttackers & pos.pieces(PAWN);
+            for (PieceType t : {KNIGHT, BISHOP, ROOK, QUEEN}) {
+                if (bb) break;
+                pt = t;
+                bb = stmAttackers & pos.pieces(t);
+            }
+            if (!bb)  // only the king can recapture: illegal if the other side still attacks the square
+                return (attackers & side[stm ^ 1]) ? res ^ 1 : res;
+            if ((swap = EParams.material[pt] - swap) < res) break;
+            occupied ^= least_significant_square_bb(bb);
+            if (pt == PAWN || pt == BISHOP || pt == QUEEN) attackers |= get_bishop_attacks(to, occupied) & bq;
+            if (pt == ROOK || pt == QUEEN) attackers |= get_rook_attacks(to, occupied) & rq;
+        }
+        return bool(res);
+    }
+
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
     // Then the quiet moves by history.
@@ -269,6 +317,9 @@ struct Searcher {
                     if (!hitsRoot && !kingCap) continue;
                     if (!kingCap && stand - gain - 200 >= beta) continue;
                 }
+                // SEE pruning (stockfish_4pc: see_ge(move, -73) with a pawn of 127, here -57 with a pawn of
+                // 100): skip captures that lose material in the exchange on their square.
+                if (!see_ge(pos, m, -57)) continue;
             }
             Position child = pos;
             child.do_move(m);
