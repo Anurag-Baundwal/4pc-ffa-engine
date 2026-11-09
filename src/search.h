@@ -1,8 +1,12 @@
 /*
-  4PC FFA engine - search: alpha-beta with iterative deepening, paranoid model (the root player maximizes
-  its score, every opponent minimizes it). Move ordering: the previous iteration's best move first at the
-  root, then captures and promotions by MVV-LVA, then quiet moves in generation order. At depth 0 a
-  root-centric quiescence search resolves captures (see qsearch).
+  4PC FFA engine - search: alpha-beta with iterative deepening. Two opponent models (SearchMode):
+    brs+:     Best-Reply Search+ (Esser et al. 2013), the default. An opponent layer covers the opponent
+              turns before the root player moves again; one of them is searched, the others play their best
+              move by move ordering (BMOM), keeping the real turn order and legal positions.
+    paranoid: every opponent turn is a MIN ply (all opponents minimize the root player's score).
+  Move ordering: the previous iteration's best move first at the root, then captures and promotions by
+  MVV-LVA, then quiet moves in generation order. At depth 0 a root-centric quiescence search resolves
+  captures (see qsearch).
 */
 
 #ifndef SEARCH_H_INCLUDED
@@ -16,10 +20,13 @@
 
 namespace FFA {
 
+enum SearchMode { MODE_BRS_PLUS, MODE_PARANOID };
+
 struct SearchOptions {
-    int moveOverhead = 30;  // ms kept in reserve per move
-    int qsMaxPly     = 8;   // quiescence plies
-    int qsCheckPly   = 2;   // quiescence plies in which check evasions are searched
+    SearchMode mode         = MODE_BRS_PLUS;
+    int        moveOverhead = 30;  // ms kept in reserve per move
+    int        qsMaxPly     = 8;   // quiescence plies
+    int        qsCheckPly   = 2;   // quiescence plies in which check evasions are searched
 };
 
 extern SearchOptions SOpts;
@@ -52,6 +59,9 @@ void search_clear();  // new game: forget what earlier searches learned (nothing
 // print, and std::cout is not thread-safe: two unsynchronized flushes once wrote "bestmove" twice, and the
 // spare line was read as the answer to the next "go".
 void sync_print(const std::string& line);
+
+const char* mode_name(SearchMode m);
+bool        parse_mode(const std::string& s, SearchMode& m);
 
 }  // namespace FFA
 
