@@ -407,7 +407,8 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
     if (n == 0) return res;
     res.best = list[0];
 
-    // Time: a soft limit to stop iterating and a hard limit to abort. An aborted iteration is thrown away.
+    // Time: a soft limit to stop iterating and a hard limit to abort. An aborted iteration keeps its best
+    // root move (see below).
     int64_t softMs = 0;
     s->nodeLimit   = limits.nodes;
     if (limits.movetime > 0) {
@@ -434,7 +435,13 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
 
     for (int depth = 1; depth <= maxDepth; ++depth) {
         Value v = s->search(pos, depth, 0, -VALUE_INFINITE, VALUE_INFINITE);
-        if (s->stopped && depth > 1) break;
+        if (s->stopped && depth > 1) {
+            // As in Stockfish, an aborted iteration's best root move is kept. The previous best is searched
+            // first, and rootBest only changes when a root move finished searching with a better score, so
+            // it is the previous best or a fully searched move that beat it.
+            if (s->rootBest) res.best = s->rootBest;
+            break;
+        }
         res.best   = s->rootBest ? s->rootBest : res.best;
         res.score  = v;
         res.depth  = depth;
