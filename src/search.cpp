@@ -317,6 +317,13 @@ struct Searcher {
                     if (!hitsRoot && !kingCap) continue;
                     if (!kingCap && stand - gain - 200 >= beta) continue;
                 }
+                // SEE futility (stockfish_4pc: !see_ge(move, alpha - futilityBase)): skip a capture whose
+                // exchange can't take the score past the bound even with the delta margin. A capture moves
+                // the eval by about 4/3 of the material (the points plus the opponents' mean), so the
+                // distance to the bound is converted to material with x3/4.
+                if (!kingCap && !m.is_promotion()
+                    && !see_ge(pos, m, maxNode ? (alpha - stand - 200) * 3 / 4 : (stand - 200 - beta) * 3 / 4))
+                    continue;
                 // SEE pruning (stockfish_4pc: see_ge(move, -73) with a pawn of 127, here -57 with a pawn of
                 // 100): skip captures that lose material in the exchange on their square.
                 if (!see_ge(pos, m, -57)) continue;
