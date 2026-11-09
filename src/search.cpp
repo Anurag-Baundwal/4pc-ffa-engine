@@ -41,8 +41,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
-// another caused a cutoff. Kept between searches; cleared by search_clear().
+// History heuristic: for each player, a quiet move from one square to another gains depth^2 when it
+// causes a cutoff and loses depth^2 when it was searched before the move that did (by the same player:
+// in the same node, or in the same opponent's turn of a BRS+ layer). Kept between searches; cleared by
+// search_clear().
 int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
 
 struct ScoredMove {
@@ -138,13 +140,20 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
-    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
-    // passes 1,000,000).
-    void update_quiet(const Position& pos, Move m, int depth) {
+    // A quiet move caused a cutoff: its history grows by depth^2 and the quiet moves the same player searched
+    // before it lose depth^2, as in Stockfish 2-6 (all history is halved when an entry passes +-1,000,000).
+    void update_quiet(const Position& pos, Move m, int depth, const Move* quiets, int nq) {
         if (pos.is_capture(m) || m.is_promotion()) return;
-        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+        auto& H     = History[pos.side_to_move()];
+        int&  h     = H[m.from_sq()][m.to_sq()];
         h += depth * depth;
-        if (h > 1000000)
+        bool halve = h > 1000000;
+        for (int i = 0; i < nq; ++i) {
+            int& q = H[quiets[i].from_sq()][quiets[i].to_sq()];
+            q -= depth * depth;
+            halve |= q < -1000000;
+        }
+        if (halve)
             for (auto& a : History)
                 for (auto& b : a)
                     for (auto& x : b) x /= 2;
@@ -301,6 +310,8 @@ struct Searcher {
 
         const bool maxNode = us == root;
         Value      best    = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
+        Move       quiets[32];  // quiet moves searched so far (stockfish_4pc keeps 32)
+        int        nq = 0;
         for (int i = 0; i < n; ++i) {
             const Move m     = moves[i].m;
             Position   child = pos;
@@ -321,9 +332,10 @@ struct Searcher {
             else
                 beta = std::min(beta, v);
             if (alpha >= beta) {
-                update_quiet(pos, m, depth);
+                update_quiet(pos, m, depth, quiets, nq);
                 break;
             }
+            if (!pos.is_capture(m) && !m.is_promotion() && nq < 32) quiets[nq++] = m;
         }
         return best;
     }
@@ -348,9 +360,12 @@ struct Searcher {
             }
             ScoredMove moves[MAX_MOVES];
             int        n = ordered_moves(cur, moves, false, Move::none());
+            Move       quiets[32];  // this opponent's quiet moves searched so far
+            int        nq = 0;
             for (int i = 0; i < n; ++i) {
-                Position child = cur;
-                child.do_move(moves[i].m);
+                const Move m     = moves[i].m;
+                Position   child = cur;
+                child.do_move(m);
                 // the remaining opponents of this layer play their BMOM
                 for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
                     if (!child.is_alive(child.side_to_move()))
@@ -365,9 +380,10 @@ struct Searcher {
                 best = std::min(best, v);
                 beta = std::min(beta, v);
                 if (alpha >= beta) {
-                    update_quiet(cur, moves[i].m, depth);
+                    update_quiet(cur, m, depth, quiets, nq);
                     return best;
                 }
+                if (!cur.is_capture(m) && !m.is_promotion() && nq < 32) quiets[nq++] = m;
             }
             Move b = bmom(cur);
             if (!b) break;
