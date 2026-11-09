@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "eval.h"
+#include "tt.h"
 
 namespace FFA {
 
@@ -89,9 +90,9 @@ struct Searcher {
         return g;
     }
 
-    // The move searched first (the previous iteration's best at the root), then captures and promotions by
-    // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Quiet moves keep their generation order.
+    // The move searched first (the transposition table's move; at the root, the previous iteration's
+    // best), then captures and promotions by MVV-LVA: the most valuable victim first and, between equal
+    // victims, the least valuable attacker. Quiet moves keep their generation order.
     int score_move(const Position& pos, Move m, Move first) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
@@ -109,13 +110,18 @@ struct Searcher {
         return n;
     }
 
-    // Best move by move ordering (BMOM), for the opponents that BRS+ doesn't search: the best capture or
-    // promotion that doesn't give up more than it wins, else the first quiet move in generation order (there
-    // is no TT or history to rank quiet moves yet).
+    // Best move by move ordering (BMOM), for the opponents that BRS+ doesn't search: the TT move, else the
+    // best capture or promotion that doesn't give up more than it wins, else the first quiet move in
+    // generation order (there is no history to rank quiet moves yet).
     Move bmom(const Position& pos) const {
         Move list[MAX_MOVES];
         int  n = pos.generate_legal(list);
         if (n == 0) return Move::none();
+        bool     found;
+        TTEntry* e = TT.probe(pos.key(), found);
+        if (found && e->move)
+            for (int i = 0; i < n; ++i)
+                if (list[i].raw() == e->move) return list[i];
         Move bestCap = Move::none(), firstQuiet = Move::none();
         int  bestCapScore = INT32_MIN;
         for (int i = 0; i < n; ++i) {
@@ -263,12 +269,27 @@ struct Searcher {
         }
         if (SOpts.mode == MODE_BRS_PLUS && us != root) return brs_layer(pos, depth, ply, alpha, beta);
 
+        // Transposition table: values are from the root player's point of view (the table is cleared when
+        // the root player changes). A deep enough entry with a usable bound ends the node; otherwise its
+        // move is searched first (at the root, the previous iteration's best move).
+        const Value alphaOrig = alpha, betaOrig = beta;
+        bool        found;
+        TTEntry*    tte    = TT.probe(pos.key(), found);
+        Move        ttMove = found ? Move(tte->move) : Move::none();
+        if (found && ply > 0 && tte->depth >= depth) {
+            Value v = tte->value;
+            if (tte->bound == BOUND_EXACT || (tte->bound == BOUND_LOWER && v >= beta) || (tte->bound == BOUND_UPPER && v <= alpha))
+                return v;
+        }
+        if (ply == 0 && rootBest) ttMove = rootBest;
+
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none());
+        int        n = ordered_moves(pos, moves, false, ttMove);
         if (n == 0) return evaluate(pos, root);
 
-        const bool maxNode = us == root;
-        Value      best    = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
+        const bool maxNode  = us == root;
+        Value      best     = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
+        Move       bestMove = Move::none();
         for (int i = 0; i < n; ++i) {
             const Move m     = moves[i].m;
             Position   child = pos;
@@ -278,7 +299,8 @@ struct Searcher {
             keys.pop_back();
             if (stopped) return 0;
             if (maxNode ? v > best : v < best) {
-                best = v;
+                best     = v;
+                bestMove = m;
                 if (ply == 0) {
                     rootBest  = m;
                     rootScore = v;
@@ -290,6 +312,9 @@ struct Searcher {
                 beta = std::min(beta, v);
             if (alpha >= beta) break;
         }
+        Bound b = maxNode ? (best >= betaOrig ? BOUND_LOWER : best > alphaOrig ? BOUND_EXACT : BOUND_UPPER)
+                          : (best <= alphaOrig ? BOUND_UPPER : best < betaOrig ? BOUND_EXACT : BOUND_LOWER);
+        TT.store(tte, pos.key(), best, b, depth, bestMove);
         return best;
     }
 
@@ -304,15 +329,29 @@ struct Searcher {
         nodes++;
         if (check_stop()) return 0;
 
-        Value    best = VALUE_INFINITE;
-        Position cur  = pos;  // the position before the current opponent's turn
+        // Transposition table, as in search(); the stored move is the first opponent's best move.
+        const Value alphaOrig = alpha, betaOrig = beta;
+        bool        found;
+        TTEntry*    tte = TT.probe(pos.key(), found);
+        if (found && tte->depth >= depth) {
+            Value v = tte->value;
+            if (tte->bound == BOUND_EXACT || (tte->bound == BOUND_LOWER && v >= beta) || (tte->bound == BOUND_UPPER && v <= alpha))
+                return v;
+        }
+        const Move ttMove = found ? Move(tte->move) : Move::none();
+
+        Value    best     = VALUE_INFINITE;
+        Move     bestMove = Move::none();
+        Position cur      = pos;  // the position before the current opponent's turn
+        bool     first    = true;
         for (int turn = 0; turn < 4 && !cur.game_over() && cur.side_to_move() != root; ++turn) {
             if (!cur.is_alive(cur.side_to_move())) {
                 cur.do_pass();
+                first = false;
                 continue;
             }
             ScoredMove moves[MAX_MOVES];
-            int        n = ordered_moves(cur, moves, false, Move::none());
+            int        n = ordered_moves(cur, moves, false, first ? ttMove : Move::none());
             for (int i = 0; i < n; ++i) {
                 Position child = cur;
                 child.do_move(moves[i].m);
@@ -327,13 +366,19 @@ struct Searcher {
                 Value v = search(child, depth - 1, ply + 1, alpha, beta);
                 keys.pop_back();
                 if (stopped) return 0;
-                best = std::min(best, v);
+                if (v < best) {
+                    best = v;
+                    if (first) bestMove = moves[i].m;
+                }
                 beta = std::min(beta, v);
-                if (alpha >= beta) return best;
+                if (alpha >= beta) goto done;
             }
-            Move b = bmom(cur);
-            if (!b) break;
-            cur.do_move(b);
+            {
+                Move b = bmom(cur);
+                if (!b) break;
+                cur.do_move(b);
+            }
+            first = false;
         }
         if (best == VALUE_INFINITE) {  // no opponent could move: continue with the root player's turn
             keys.push_back(cur.board_key());
@@ -341,13 +386,22 @@ struct Searcher {
             keys.pop_back();
             return v;
         }
+    done:
+        Bound b = best <= alphaOrig ? BOUND_UPPER : best < betaOrig ? BOUND_EXACT : BOUND_LOWER;
+        TT.store(tte, pos.key(), best, b, depth, bestMove);
         return best;
     }
 };
 
+// The root player of the last search: the TT holds values from its point of view.
+Color LastRoot = NO_COLOR;
+
 }  // namespace
 
-void search_clear() {}
+void search_clear() {
+    TT.clear();
+    LastRoot = NO_COLOR;
+}
 
 SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<bool>& stop, bool verbose) {
     SearchResult    res;
@@ -359,6 +413,11 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
     s->stopFlag = &stop;
     s->start    = Clock::now();
     s->keys     = game.history;
+    if (LastRoot != s->root) {
+        TT.clear();
+        LastRoot = s->root;
+    }
+    TT.new_search();
 
     if (pos.resign_wins(s->root)) {
         res.resign = true;
@@ -406,7 +465,7 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
             int64_t            ms = std::max<int64_t>(1, s->elapsed());
             std::ostringstream os;
             os << "info depth " << depth << " score cp " << v << " nodes " << s->nodes << " nps "
-               << s->nodes * 1000 / ms << " time " << s->elapsed() << " pv " << move_to_string(res.best);
+               << s->nodes * 1000 / ms << " time " << s->elapsed() << " hashfull " << TT.hashfull() << " pv " << move_to_string(res.best);
             sync_print(os.str());
         }
         if (s->stopped) break;
