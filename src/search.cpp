@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -41,9 +42,18 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
-// another caused a cutoff. Kept between searches; cleared by search_clear().
+// History heuristic: for each player, how well a quiet move from one square to another did at causing
+// cutoffs (stockfish_4pc's bonus and bounded update). Kept between searches; cleared by search_clear().
 int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
+
+// stockfish_4pc's history update (StatsEntry::operator<< in its history.h): the bonus is clamped to
+// +-HistoryMax and the entry moves by bonus - entry * |bonus| / HistoryMax, so it never leaves that range.
+constexpr int HistoryMax = 7183;
+
+inline void history_update(int& h, int bonus) {
+    const int b = std::clamp(bonus, -HistoryMax, HistoryMax);
+    h += b - h * std::abs(b) / HistoryMax;
+}
 
 struct ScoredMove {
     Move m;
@@ -138,16 +148,11 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
-    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
-    // passes 1,000,000).
+    // A quiet move caused a cutoff: its history gets stockfish_4pc's bonus min(128 depth - 77, 1529) * 2
+    // through the bounded update.
     void update_quiet(const Position& pos, Move m, int depth) {
         if (pos.is_capture(m) || m.is_promotion()) return;
-        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
-        h += depth * depth;
-        if (h > 1000000)
-            for (auto& a : History)
-                for (auto& b : a)
-                    for (auto& x : b) x /= 2;
+        history_update(History[pos.side_to_move()][m.from_sq()][m.to_sq()], std::min(128 * depth - 77, 1529) * 2);
     }
 
     // ---------------------------------------------------------------------------------------------
