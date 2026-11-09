@@ -420,7 +420,8 @@ struct Searcher {
 
         // The opponents' turns of the layer: the position before each turn (the earlier opponents play their
         // BMOM) and its moves after opponent-relevance pruning. All of them are then searched in one order,
-        // across opponents: captures and promotions by MVV-LVA, then quiet moves by history.
+        // across opponents: captures of the root player's pieces first, then the other captures and promotions by
+        // MVV-LVA, then quiet moves by history.
         struct LayerMove {
             int  score;
             Move m;
@@ -446,7 +447,10 @@ struct Searcher {
                 // Opponent-relevance pruning: of this opponent's moves that don't touch the root player, only
                 // the first (in move order) is searched, unless the opponent is in check.
                 if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
-                all[na++] = {moves[i].score, moves[i].m, nt};
+                // captures of the root player's pieces first
+                const Piece victim = cur.piece_on(moves[i].m.to_sq());
+                const int   bonus  = victim != NO_PIECE && color_of(victim) == root ? 100000000 : 0;
+                all[na++] = {moves[i].score + bonus, moves[i].m, nt};
             }
             ++nt;
             Move b = bmom(cur);
