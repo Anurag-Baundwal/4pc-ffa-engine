@@ -142,7 +142,9 @@ struct Searcher {
     // promotions, attacks on the root's pieces or king zone from the destination, a piece leaving a line
     // through the root's king (possible discovered attack), or a piece escaping the root's attack. Everything
     // else ("Green pushes a pawn on the far side") is mostly skipped in BRS+ opponent layers.
-    bool relevant_to_root(const Position& pos, Move m) const {
+    // Approach moves count too (approach = approach_squares() of pos): a knight, bishop, rook or queen whose
+    // new square lets it reach, next move, a square from which it attacks the root king's zone.
+    bool relevant_to_root(const Position& pos, Move m, const Bitboard* approach) const {
         const Color  us = pos.side_to_move();
         const Square from = m.from_sq(), to = m.to_sq();
         const Piece  victim = pos.piece_on(to);
@@ -155,8 +157,24 @@ struct Searcher {
         const Bitboard occ = (pos.pieces() ^ from) | to;
         Bitboard       att = type_of(pc) == PAWN ? PawnAttacks[us][to] : attacks_bb(type_of(pc), to, occ);
         if (att & targets) return true;
+        const PieceType pt = type_of(pc);
+        if (pt >= KNIGHT && pt <= QUEEN && (att & approach[pt] & ~pos.pieces(us))) return true;
         if (rk != SQ_NONE && PseudoAttacks[QUEEN][rk].test(from)) return true;
         return bool(pos.attackers_to(from, pos.pieces()) & pos.pieces(root));
+    }
+
+    // For each of knight, bishop, rook and queen: the squares from which it attacks the root king's zone
+    // (the king's square and its neighbours) on pos's board.
+    void approach_squares(const Position& pos, Bitboard* out) const {
+        for (int pt = 0; pt < PIECE_TYPE_NB; ++pt) out[pt] = Bitboard::zero();
+        const Square rk = pos.king_square(root);
+        if (rk == SQ_NONE) return;
+        Bitboard zone = PseudoAttacks[KING][rk] | square_bb(rk);
+        while (zone) {
+            const Square s = pop_lsb(zone);
+            for (PieceType pt : {KNIGHT, BISHOP, ROOK}) out[pt] |= attacks_bb(pt, s, pos.pieces());
+        }
+        out[QUEEN] = out[BISHOP] | out[ROOK];
     }
 
     // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
@@ -371,10 +389,12 @@ struct Searcher {
             int        n          = ordered_moves(cur, moves, false, Move::none());
             const bool inCheck    = cur.in_check(cur.side_to_move());
             int        irrelevant = 0;
+            Bitboard   approach[PIECE_TYPE_NB];
+            if (!inCheck) approach_squares(cur, approach);
             for (int i = 0; i < n; ++i) {
                 // Opponent-relevance pruning: of this opponent's moves that don't touch the root player, only
                 // the first (in move order) is searched, unless the opponent is in check.
-                if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
+                if (!inCheck && !relevant_to_root(cur, moves[i].m, approach) && irrelevant++ >= 1) continue;
                 Position child = cur;
                 child.do_move(moves[i].m);
                 // the remaining opponents of this layer play their BMOM
