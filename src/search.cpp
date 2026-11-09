@@ -60,6 +60,8 @@ struct Searcher {
     std::vector<Key>   keys;  // board keys of the game so far and of the searched path
     Move               rootBest = Move::none();
     Value              rootScore = 0;
+    Square             lastTo[MAX_PLY + 1];  // per ply: where the previous move went (after a BRS+ layer: the
+                                             // layer's last capture, else the searched opponent move)
 
     int64_t elapsed() const {
         return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
@@ -213,6 +215,7 @@ struct Searcher {
             if (qply >= SOpts.qsMaxPly) return evaluate(pos, root);
             Position child = pos;
             child.do_pass();
+            lastTo[ply + 1] = lastTo[ply];
             return qsearch(child, ply + 1, alpha, beta, qply + 1);
         }
         const bool maxNode = us == root;
@@ -231,6 +234,7 @@ struct Searcher {
                 while (!child.game_over() && child.side_to_move() != root && !child.is_alive(child.side_to_move()))
                     child.do_pass();  // zombies' turns are passes too
                 if (!child.game_over() && child.side_to_move() != root) {
+                    lastTo[ply + 1] = lastTo[ply];
                     best = qsearch(child, ply + 1, alpha, beta, qply + 1);
                     if (stopped) return 0;
                 }
@@ -246,32 +250,36 @@ struct Searcher {
         } else
             best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
 
-        ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, !inCheck, Move::none());
+        ScoredMove   moves[MAX_MOVES];
+        int          n         = ordered_moves(pos, moves, !inCheck, Move::none());
+        const Square prevSq    = lastTo[ply];
+        int          moveCount = 0;
         if (n == 0) return inCheck ? stand : best;
         for (int i = 0; i < n; ++i) {
             const Move m = moves[i].m;
             if (!inCheck) {
                 // Root-centric quiescence: the root player's captures, and the opponents' captures of the
                 // root player's pieces (or of a king). Opponents trading among themselves barely changes
-                // the root's score. Delta pruning on top.
+                // the root's score. Move-count and delta pruning on top.
                 Square to      = m.to_sq();
                 Piece  victim  = pos.piece_on(to);
                 bool   kingCap = victim != NO_PIECE && type_of(victim) == KING;
                 int    gain    = victim_gain(pos, m);
-                if (maxNode) {
-                    if (!kingCap && stand + gain + 200 <= alpha) continue;
-                } else {
+                if (!maxNode) {
                     bool hitsRoot = victim != NO_PIECE && color_of(victim) == root;
                     if (m.type_of() == EN_PASSANT)
                         for (int c = 0; c < COLOR_NB; ++c)
                             if (pos.ep_square(Color(c)) == to && c == root) hitsRoot = true;
                     if (!hitsRoot && !kingCap) continue;
-                    if (!kingCap && stand - gain - 200 >= beta) continue;
                 }
+                // Move-count pruning (stockfish_4pc): after the first two captures, only recaptures (on the
+                // previous move's square), promotions and king captures.
+                if (++moveCount > 2 && !kingCap && to != prevSq && !m.is_promotion()) continue;
+                if (!kingCap && (maxNode ? stand + gain + 200 <= alpha : stand - gain - 200 >= beta)) continue;
             }
             Position child = pos;
             child.do_move(m);
+            lastTo[ply + 1] = m.to_sq();
             Value v = qsearch(child, ply + 1, alpha, beta, qply + 1);
             if (stopped) return 0;
             if (maxNode) {
@@ -310,6 +318,7 @@ struct Searcher {
             Position child = pos;
             child.do_pass();
             keys.push_back(child.board_key());
+            lastTo[ply + 1] = lastTo[ply];
             Value v = search(child, depth, ply + 1, alpha, beta);
             keys.pop_back();
             return v;
@@ -327,6 +336,7 @@ struct Searcher {
             Position   child = pos;
             child.do_move(m);
             keys.push_back(child.board_key());
+            lastTo[ply + 1] = m.to_sq();
             Value v = next_node(child, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             if (stopped) return 0;
@@ -360,8 +370,9 @@ struct Searcher {
         nodes++;
         if (check_stop()) return 0;
 
-        Value    best = VALUE_INFINITE;
-        Position cur  = pos;  // the position before the current opponent's turn
+        Value    best   = VALUE_INFINITE;
+        Position cur    = pos;      // the position before the current opponent's turn
+        Square   curCap = SQ_NONE;  // the last capture among the BMOMs played into cur
         for (int turn = 0; turn < 4 && !cur.game_over() && cur.side_to_move() != root; ++turn) {
             if (!cur.is_alive(cur.side_to_move())) {
                 cur.do_pass();
@@ -376,15 +387,20 @@ struct Searcher {
                 // the first (in move order) is searched, unless the opponent is in check.
                 if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
                 Position child = cur;
+                Square   last  = cur.is_capture(moves[i].m) ? moves[i].m.to_sq() : curCap;
                 child.do_move(moves[i].m);
                 // the remaining opponents of this layer play their BMOM
                 for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
                     if (!child.is_alive(child.side_to_move()))
                         child.do_pass();
-                    else
-                        child.do_move(bmom(child));
+                    else {
+                        Move b2 = bmom(child);
+                        if (b2 && child.is_capture(b2)) last = b2.to_sq();
+                        child.do_move(b2);
+                    }
                 }
                 keys.push_back(child.board_key());
+                lastTo[ply + 1] = last != SQ_NONE ? last : moves[i].m.to_sq();
                 Value v = search(child, depth - 1, ply + 1, alpha, beta);
                 keys.pop_back();
                 if (stopped) return 0;
@@ -397,10 +413,12 @@ struct Searcher {
             }
             Move b = bmom(cur);
             if (!b) break;
+            if (cur.is_capture(b)) curCap = b.to_sq();
             cur.do_move(b);
         }
         if (best == VALUE_INFINITE) {  // no opponent could move: continue with the root player's turn
             keys.push_back(cur.board_key());
+            lastTo[ply + 1] = curCap != SQ_NONE ? curCap : lastTo[ply];
             Value v = search(cur, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             return v;
@@ -423,6 +441,7 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
     s->stopFlag = &stop;
     s->start    = Clock::now();
     s->keys     = game.history;
+    s->lastTo[0] = SQ_NONE;
 
     if (pos.resign_wins(s->root)) {
         res.resign = true;
