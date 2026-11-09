@@ -42,7 +42,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 // History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
-// another caused a cutoff. Kept between searches; cleared by search_clear().
+// another caused a cutoff. Kept between searches but multiplied by 820/1024 at the start of each, as in
+// stockfish_4pc; cleared by search_clear().
 int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
 
 struct ScoredMove {
@@ -397,6 +398,10 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
     s->stopFlag = &stop;
     s->start    = Clock::now();
     s->keys     = game.history;
+    // stockfish_4pc ages the history at the start of every search.
+    for (auto& a : History)
+        for (auto& b : a)
+            for (auto& x : b) x = x * 820 / 1024;
 
     if (pos.resign_wins(s->root)) {
         res.resign = true;
