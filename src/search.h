@@ -5,8 +5,9 @@
               move by move ordering (BMOM), keeping the real turn order and legal positions.
     paranoid: every opponent turn is a MIN ply (all opponents minimize the root player's score).
   Move ordering: the previous iteration's best move first at the root, then captures and promotions by
-  MVV-LVA, then quiet moves by history. At depth 0 a root-centric quiescence search resolves captures (see
-  qsearch).
+  MVV-LVA, then quiet moves by history; late quiet moves are searched with reduced depth, more so when
+  their history is zero (see reduction()). At depth 0 a root-centric quiescence search resolves captures
+  (see qsearch).
 */
 
 #ifndef SEARCH_H_INCLUDED

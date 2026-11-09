@@ -138,6 +138,16 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
+    // Late move reductions: at depth 3 or more, a quiet move after the first three of its node (or of its
+    // player's turn in a BRS+ layer), with the side to move not in check, is searched one ply shallower, or
+    // two when its history is zero (it never caused a cutoff) and depth >= 4. The reduced search keeps at
+    // least depth 1, and a reduced move that still beats the bound is searched again at full depth.
+    int reduction(const Position& pos, Move m, int depth, int index, bool inCheck) const {
+        if (depth < 3 || index < 3 || inCheck || pos.is_capture(m) || m.is_promotion()) return 0;
+        int r = 1 + (History[pos.side_to_move()][m.from_sq()][m.to_sq()] == 0 && depth >= 4);
+        return std::min(r, depth - 2);
+    }
+
     // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
     // passes 1,000,000).
     void update_quiet(const Position& pos, Move m, int depth) {
@@ -300,13 +310,16 @@ struct Searcher {
         if (n == 0) return evaluate(pos, root);
 
         const bool maxNode = us == root;
+        const bool inCheck = pos.in_check(us);
         Value      best    = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
         for (int i = 0; i < n; ++i) {
             const Move m     = moves[i].m;
             Position   child = pos;
             child.do_move(m);
             keys.push_back(child.board_key());
-            Value v = next_node(child, depth - 1, ply + 1, alpha, beta);
+            const int r = reduction(pos, m, depth, i, inCheck);
+            Value     v = next_node(child, depth - 1 - r, ply + 1, alpha, beta);
+            if (r > 0 && !stopped && (maxNode ? v > alpha : v < beta)) v = next_node(child, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             if (stopped) return 0;
             if (maxNode ? v > best : v < best) {
@@ -347,7 +360,8 @@ struct Searcher {
                 continue;
             }
             ScoredMove moves[MAX_MOVES];
-            int        n = ordered_moves(cur, moves, false, Move::none());
+            int        n       = ordered_moves(cur, moves, false, Move::none());
+            const bool inCheck = cur.in_check(cur.side_to_move());
             for (int i = 0; i < n; ++i) {
                 Position child = cur;
                 child.do_move(moves[i].m);
@@ -359,7 +373,9 @@ struct Searcher {
                         child.do_move(bmom(child));
                 }
                 keys.push_back(child.board_key());
-                Value v = search(child, depth - 1, ply + 1, alpha, beta);
+                const int r = reduction(cur, moves[i].m, depth, i, inCheck);
+                Value     v = search(child, depth - 1 - r, ply + 1, alpha, beta);
+                if (r > 0 && !stopped && v < beta) v = search(child, depth - 1, ply + 1, alpha, beta);
                 keys.pop_back();
                 if (stopped) return 0;
                 best = std::min(best, v);
