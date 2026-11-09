@@ -138,6 +138,18 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
+    // What a move is worth to the opponent that plays it, in victim_gain units: a capture or promotion counts
+    // in full when no other player attacks the destination afterwards, else minus the moving piece (twice its
+    // material, as victim_gain counts points + material). A quiet move is worth 0.
+    int own_gain(const Position& pos, Move m) const {
+        if (!pos.is_capture(m) && !m.is_promotion()) return 0;
+        const Square   from = m.from_sq(), to = m.to_sq();
+        const int      g    = victim_gain(pos, m);
+        const int      risk = EParams.material[m.is_promotion() ? QUEEN : type_of(pos.piece_on(from))];
+        const Bitboard occ  = (pos.pieces() ^ from) | to;
+        return pos.attacked_by_others(to, pos.side_to_move(), occ) ? g - 2 * risk : g;
+    }
+
     // Does an opponent's move touch the root player? Captures of the root's pieces or of a king, en passant,
     // promotions, attacks on the root's pieces or king zone from the destination, a piece leaving a line
     // through the root's king (possible discovered attack), or a piece escaping the root's attack. Everything
@@ -371,7 +383,14 @@ struct Searcher {
             int        n          = ordered_moves(cur, moves, false, Move::none());
             const bool inCheck    = cur.in_check(cur.side_to_move());
             int        irrelevant = 0;
+            // Plausible replies: an opponent plays for itself. When it has a capture worth clearly more to it
+            // (by own_gain, more than 600 = a knight's victim_gain) than a move, that move isn't its reply,
+            // however much it would hurt the root player. In check every move stays.
+            int own[MAX_MOVES], bestOwn = 0;
+            if (!inCheck)
+                for (int i = 0; i < n; ++i) bestOwn = std::max(bestOwn, own[i] = own_gain(cur, moves[i].m));
             for (int i = 0; i < n; ++i) {
+                if (!inCheck && own[i] + 600 < bestOwn) continue;
                 // Opponent-relevance pruning: of this opponent's moves that don't touch the root player, only
                 // the first (in move order) is searched, unless the opponent is in check.
                 if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
