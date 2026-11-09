@@ -418,13 +418,26 @@ struct Searcher {
         nodes++;
         if (check_stop()) return 0;
 
-        Value    best = VALUE_INFINITE;
-        Position cur  = pos;  // the position before the current opponent's turn
+        // The opponents' turns of the layer: the position before each turn (the earlier opponents play their
+        // BMOM) and its moves after opponent-relevance pruning. All of them are then searched in one order,
+        // across opponents: captures and promotions by MVV-LVA, then quiet moves by history.
+        struct LayerMove {
+            int  score;
+            Move m;
+            int  turn;
+        };
+        Value     best = VALUE_INFINITE;
+        Position  turns[4];
+        int       nt  = 0;
+        Position  cur = pos;  // ends as the position after all BMOMs (the root player's turn)
+        LayerMove all[4 * MAX_MOVES];
+        int       na = 0;
         for (int turn = 0; turn < 4 && !cur.game_over() && cur.side_to_move() != root; ++turn) {
             if (!cur.is_alive(cur.side_to_move())) {
                 cur.do_pass();
                 continue;
             }
+            turns[nt] = cur;
             ScoredMove moves[MAX_MOVES];
             int        n          = ordered_moves(cur, moves, false, Move::none());
             const bool inCheck    = cur.in_check(cur.side_to_move());
@@ -433,29 +446,34 @@ struct Searcher {
                 // Opponent-relevance pruning: of this opponent's moves that don't touch the root player, only
                 // the first (in move order) is searched, unless the opponent is in check.
                 if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
-                Position child = cur;
-                child.do_move(moves[i].m);
-                // the remaining opponents of this layer play their BMOM
-                for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
-                    if (!child.is_alive(child.side_to_move()))
-                        child.do_pass();
-                    else
-                        child.do_move(bmom(child));
-                }
-                keys.push_back(child.board_key());
-                Value v = search(child, depth - 1, ply + 1, alpha, beta);
-                keys.pop_back();
-                if (stopped) return 0;
-                best = std::min(best, v);
-                beta = std::min(beta, v);
-                if (alpha >= beta) {
-                    update_quiet(cur, moves[i].m, depth);
-                    return best;
-                }
+                all[na++] = {moves[i].score, moves[i].m, nt};
             }
+            ++nt;
             Move b = bmom(cur);
             if (!b) break;
             cur.do_move(b);
+        }
+        std::stable_sort(all, all + na, [](const LayerMove& a, const LayerMove& b) { return a.score > b.score; });
+        for (int i = 0; i < na; ++i) {
+            Position child = turns[all[i].turn];
+            child.do_move(all[i].m);
+            // the remaining opponents of this layer play their BMOM
+            for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
+                if (!child.is_alive(child.side_to_move()))
+                    child.do_pass();
+                else
+                    child.do_move(bmom(child));
+            }
+            keys.push_back(child.board_key());
+            Value v = search(child, depth - 1, ply + 1, alpha, beta);
+            keys.pop_back();
+            if (stopped) return 0;
+            best = std::min(best, v);
+            beta = std::min(beta, v);
+            if (alpha >= beta) {
+                update_quiet(turns[all[i].turn], all[i].m, depth);
+                return best;
+            }
         }
         if (best == VALUE_INFINITE) {  // no opponent could move: continue with the root player's turn
             keys.push_back(cur.board_key());
