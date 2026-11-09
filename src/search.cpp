@@ -59,6 +59,7 @@ struct Searcher {
     bool               stopped = false;
     std::vector<Key>   keys;  // board keys of the game so far and of the searched path
     Move               rootBest = Move::none();
+    Move               killers[MAX_PLY + 8][2] = {};  // two quiet moves per ply that caused cutoffs
     Value              rootScore = 0;
 
     int64_t elapsed() const {
@@ -96,28 +97,30 @@ struct Searcher {
 
     // The move searched first (the previous iteration's best at the root), then captures and promotions by
     // MVV-LVA: the most valuable victim first and, between equal victims, the least valuable attacker.
-    // Then the quiet moves by history.
-    int score_move(const Position& pos, Move m, Move first) const {
+    // Then the ply's two killer moves (only where they are legal), then the other quiet moves by history.
+    int score_move(const Position& pos, Move m, Move first, int ply) const {
         if (m == first) return 100000000;
         if (pos.is_capture(m) || m.is_promotion()) {
             int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
             return 10000000 + victim_gain(pos, m) * 8 - attacker / 8;
         }
+        if (ply < MAX_PLY && m == killers[ply][0]) return 9000000;
+        if (ply < MAX_PLY && m == killers[ply][1]) return 8999999;
         return History[pos.side_to_move()][m.from_sq()][m.to_sq()];
     }
 
-    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first) const {
+    int ordered_moves(const Position& pos, ScoredMove* out, bool capturesOnly, Move first, int ply) const {
         Move list[MAX_MOVES];
         int  n = capturesOnly ? pos.generate_captures(list) : pos.generate_legal(list);
-        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
+        for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first, ply)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
     }
 
     // Best move by move ordering (BMOM), for the opponents that BRS+ doesn't search: the best capture or
-    // promotion that doesn't give up more than it wins, else the quiet move with the best history (the first
-    // one in generation order on ties).
-    Move bmom(const Position& pos) const {
+    // promotion that doesn't give up more than it wins, else the quiet move with the best ordering score: a
+    // killer of the layer's ply first, then the best history (the first one in generation order on ties).
+    Move bmom(const Position& pos, int ply) const {
         Move list[MAX_MOVES];
         int  n = pos.generate_legal(list);
         if (n == 0) return Move::none();
@@ -131,17 +134,21 @@ struct Searcher {
                 int s        = gain - attacker / 8;
                 if (gain + 50 >= attacker && s > bestCapScore) bestCapScore = s, bestCap = m;
             } else {
-                int s = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
+                int s = score_move(pos, m, Move::none(), ply);
                 if (s > bestQuietScore) bestQuietScore = s, bestQuiet = m;
             }
         }
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
-    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
-    // passes 1,000,000).
-    void update_quiet(const Position& pos, Move m, int depth) {
+    // A quiet move caused a cutoff: it becomes the ply's first killer (the old first one moves to second) and
+    // its history grows by depth^2 (all history is halved when an entry passes 1,000,000).
+    void update_quiet(const Position& pos, Move m, int depth, int ply) {
         if (pos.is_capture(m) || m.is_promotion()) return;
+        if (ply < MAX_PLY && killers[ply][0] != m) {
+            killers[ply][1] = killers[ply][0];
+            killers[ply][0] = m;
+        }
         int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
         h += depth * depth;
         if (h > 1000000)
@@ -226,7 +233,7 @@ struct Searcher {
             best = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, !inCheck, Move::none());
+        int        n = ordered_moves(pos, moves, !inCheck, Move::none(), ply);
         if (n == 0) return inCheck ? stand : best;
         for (int i = 0; i < n; ++i) {
             const Move m = moves[i].m;
@@ -296,7 +303,7 @@ struct Searcher {
         if (SOpts.mode == MODE_BRS_PLUS && us != root) return brs_layer(pos, depth, ply, alpha, beta);
 
         ScoredMove moves[MAX_MOVES];
-        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none());
+        int        n = ordered_moves(pos, moves, false, ply == 0 ? rootBest : Move::none(), ply);
         if (n == 0) return evaluate(pos, root);
 
         const bool maxNode = us == root;
@@ -321,7 +328,7 @@ struct Searcher {
             else
                 beta = std::min(beta, v);
             if (alpha >= beta) {
-                update_quiet(pos, m, depth);
+                update_quiet(pos, m, depth, ply);
                 break;
             }
         }
@@ -347,7 +354,7 @@ struct Searcher {
                 continue;
             }
             ScoredMove moves[MAX_MOVES];
-            int        n = ordered_moves(cur, moves, false, Move::none());
+            int        n = ordered_moves(cur, moves, false, Move::none(), ply);
             for (int i = 0; i < n; ++i) {
                 Position child = cur;
                 child.do_move(moves[i].m);
@@ -356,7 +363,7 @@ struct Searcher {
                     if (!child.is_alive(child.side_to_move()))
                         child.do_pass();
                     else
-                        child.do_move(bmom(child));
+                        child.do_move(bmom(child, ply));
                 }
                 keys.push_back(child.board_key());
                 Value v = search(child, depth - 1, ply + 1, alpha, beta);
@@ -365,11 +372,11 @@ struct Searcher {
                 best = std::min(best, v);
                 beta = std::min(beta, v);
                 if (alpha >= beta) {
-                    update_quiet(cur, moves[i].m, depth);
+                    update_quiet(cur, moves[i].m, depth, ply);
                     return best;
                 }
             }
-            Move b = bmom(cur);
+            Move b = bmom(cur, ply);
             if (!b) break;
             cur.do_move(b);
         }
