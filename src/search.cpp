@@ -438,16 +438,7 @@ struct Searcher {
                 if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
                 Position child = cur;
                 child.do_move(moves[i].m);
-                // the remaining opponents of this layer play their BMOM
-                for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
-                    if (!child.is_alive(child.side_to_move()))
-                        child.do_pass();
-                    else
-                        child.do_move(bmom(child));
-                }
-                keys.push_back(child.board_key());
-                Value v = search(child, depth - 1, ply + 1, alpha, beta);
-                keys.pop_back();
+                Value v = layer_rest(child, depth, ply, alpha, beta, true, 4);
                 if (stopped) return 0;
                 best = std::min(best, v);
                 beta = std::min(beta, v);
@@ -467,6 +458,45 @@ struct Searcher {
             return v;
         }
         return best;
+    }
+
+    // The rest of a BRS+ layer after the searched opponent's move: the later opponents play their BMOM, but
+    // one of them may instead capture a piece of the root player. That covers two opponents combining in one
+    // round (one sets up, the next captures, e.g. Qa8-b9 then Qn7xi2#), which plain BRS+ never sees: there
+    // the capturing opponent only plays its BMOM. Only captures that don't lose material (SEE >= 0) count.
+    // A MIN node over those lines; then the root player's turn.
+    Value layer_rest(const Position& pos, int depth, int ply, Value alpha, Value beta, bool capAllowed, int turns) {
+        if (turns <= 0 || pos.game_over() || pos.side_to_move() == root) {
+            keys.push_back(pos.board_key());
+            Value v = search(pos, depth - 1, ply + 1, alpha, beta);
+            keys.pop_back();
+            return v;
+        }
+        Position child = pos;
+        if (!pos.is_alive(pos.side_to_move())) {
+            child.do_pass();
+            return layer_rest(child, depth, ply, alpha, beta, capAllowed, turns - 1);
+        }
+        const Move b    = bmom(pos);
+        Value      best = VALUE_INFINITE;
+        if (capAllowed) {
+            Move list[MAX_MOVES];
+            int  n = pos.generate_captures(list);
+            for (int i = 0; i < n; ++i) {
+                const Move m      = list[i];
+                const Piece victim = pos.piece_on(m.to_sq());
+                if (m == b || victim == NO_PIECE || color_of(victim) != root || !see_ge(pos, m, 0)) continue;
+                Position c2 = pos;
+                c2.do_move(m);
+                Value v = layer_rest(c2, depth, ply, alpha, beta, false, turns - 1);
+                if (stopped) return 0;
+                best = std::min(best, v);
+                beta = std::min(beta, v);
+                if (alpha >= beta) return best;
+            }
+        }
+        child.do_move(b);
+        return std::min(best, layer_rest(child, depth, ply, alpha, beta, capAllowed, turns - 1));
     }
 };
 
