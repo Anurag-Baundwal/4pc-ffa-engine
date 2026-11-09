@@ -28,6 +28,15 @@ void sync_print(const std::string& line) {
     std::cout << line << std::endl;
 }
 
+const char* mode_name(SearchMode m) { return m == MODE_PARANOID ? "paranoid" : "brs+"; }
+
+bool parse_mode(const std::string& s, SearchMode& m) {
+    if (s == "brs+" || s == "brs") m = MODE_BRS_PLUS;
+    else if (s == "paranoid") m = MODE_PARANOID;
+    else return false;
+    return true;
+}
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -99,6 +108,33 @@ struct Searcher {
         for (int i = 0; i < n; ++i) out[i] = {list[i], score_move(pos, list[i], first)};
         std::stable_sort(out, out + n, [](const ScoredMove& a, const ScoredMove& b) { return a.score > b.score; });
         return n;
+    }
+
+    // Best move by move ordering (BMOM), for the opponents that BRS+ doesn't search: the TT move, else the
+    // best capture or promotion that doesn't give up more than it wins, else the first quiet move in
+    // generation order (there is no history to rank quiet moves yet).
+    Move bmom(const Position& pos) const {
+        Move list[MAX_MOVES];
+        int  n = pos.generate_legal(list);
+        if (n == 0) return Move::none();
+        bool     found;
+        TTEntry* e = TT.probe(pos.key(), found);
+        if (found && e->move)
+            for (int i = 0; i < n; ++i)
+                if (list[i].raw() == e->move) return list[i];
+        Move bestCap = Move::none(), firstQuiet = Move::none();
+        int  bestCapScore = INT32_MIN;
+        for (int i = 0; i < n; ++i) {
+            Move m = list[i];
+            if (pos.is_capture(m) || m.is_promotion()) {
+                int gain     = victim_gain(pos, m);
+                int attacker = EParams.material[type_of(pos.piece_on(m.from_sq()))];
+                int s        = gain - attacker / 8;
+                if (gain + 50 >= attacker && s > bestCapScore) bestCapScore = s, bestCap = m;
+            } else if (!firstQuiet)
+                firstQuiet = m;
+        }
+        return bestCap ? bestCap : firstQuiet ? firstQuiet : list[0];
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -203,8 +239,17 @@ struct Searcher {
         return best;
     }
 
-    // Alpha-beta, paranoid: the root player's turns maximize, every opponent's turn minimizes. A zombie's
-    // turn (chess.com moves its king at random) is a pass. At depth 0 the quiescence search takes over.
+    // The next node after a move: in BRS+ an opponent's turn starts an opponent layer.
+    Value next_node(const Position& child, int depth, int ply, Value alpha, Value beta) {
+        if (SOpts.mode == MODE_BRS_PLUS && !child.game_over() && child.side_to_move() != root)
+            return brs_layer(child, depth, ply, alpha, beta);
+        return search(child, depth, ply, alpha, beta);
+    }
+
+    // Alpha-beta. In paranoid mode every ply is one player's turn: the root player's turns maximize, every
+    // opponent's turn minimizes. In BRS+ mode this is only called with the root player to move; the
+    // opponents' turns are handled by brs_layer(). A zombie's turn (chess.com moves its king at random) is
+    // a pass. At depth 0 the quiescence search takes over.
     Value search(const Position& pos, int depth, int ply, Value alpha, Value beta) {
         if (pos.game_over()) return terminal_value(pos, root);
         if (Value cv; claim_value(pos, cv)) return cv;
@@ -222,6 +267,7 @@ struct Searcher {
             keys.pop_back();
             return v;
         }
+        if (SOpts.mode == MODE_BRS_PLUS && us != root) return brs_layer(pos, depth, ply, alpha, beta);
 
         // Transposition table: values are from the root player's point of view (the table is cleared when
         // the root player changes). A deep enough entry with a usable bound ends the node; otherwise its
@@ -249,7 +295,7 @@ struct Searcher {
             Position   child = pos;
             child.do_move(m);
             keys.push_back(child.board_key());
-            Value v = search(child, depth - 1, ply + 1, alpha, beta);
+            Value v = next_node(child, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             if (stopped) return 0;
             if (maxNode ? v > best : v < best) {
@@ -268,6 +314,80 @@ struct Searcher {
         }
         Bound b = maxNode ? (best >= betaOrig ? BOUND_LOWER : best > alphaOrig ? BOUND_EXACT : BOUND_UPPER)
                           : (best <= alphaOrig ? BOUND_UPPER : best < betaOrig ? BOUND_EXACT : BOUND_LOWER);
+        TT.store(tte, pos.key(), best, b, depth, bestMove);
+        return best;
+    }
+
+    // BRS+ opponent layer (Esser et al. 2013): pos has the first opponent to move. Every opponent's moves
+    // are tried in turn while the other opponents of the layer play their BMOM, keeping the real turn order
+    // and legal positions; the layer is a MIN node over all those lines and ends when the root player is to
+    // move again. It counts as one depth unit.
+    Value brs_layer(const Position& pos, int depth, int ply, Value alpha, Value beta) {
+        if (pos.game_over()) return terminal_value(pos, root);
+        if (Value cv; claim_value(pos, cv)) return cv;
+        if (depth <= 0 || ply >= MAX_PLY - 2) return qsearch(pos, ply, alpha, beta, 0);
+        nodes++;
+        if (check_stop()) return 0;
+
+        // Transposition table, as in search(); the stored move is the first opponent's best move.
+        const Value alphaOrig = alpha, betaOrig = beta;
+        bool        found;
+        TTEntry*    tte = TT.probe(pos.key(), found);
+        if (found && tte->depth >= depth) {
+            Value v = tte->value;
+            if (tte->bound == BOUND_EXACT || (tte->bound == BOUND_LOWER && v >= beta) || (tte->bound == BOUND_UPPER && v <= alpha))
+                return v;
+        }
+        const Move ttMove = found ? Move(tte->move) : Move::none();
+
+        Value    best     = VALUE_INFINITE;
+        Move     bestMove = Move::none();
+        Position cur      = pos;  // the position before the current opponent's turn
+        bool     first    = true;
+        for (int turn = 0; turn < 4 && !cur.game_over() && cur.side_to_move() != root; ++turn) {
+            if (!cur.is_alive(cur.side_to_move())) {
+                cur.do_pass();
+                first = false;
+                continue;
+            }
+            ScoredMove moves[MAX_MOVES];
+            int        n = ordered_moves(cur, moves, false, first ? ttMove : Move::none());
+            for (int i = 0; i < n; ++i) {
+                Position child = cur;
+                child.do_move(moves[i].m);
+                // the remaining opponents of this layer play their BMOM
+                for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
+                    if (!child.is_alive(child.side_to_move()))
+                        child.do_pass();
+                    else
+                        child.do_move(bmom(child));
+                }
+                keys.push_back(child.board_key());
+                Value v = search(child, depth - 1, ply + 1, alpha, beta);
+                keys.pop_back();
+                if (stopped) return 0;
+                if (v < best) {
+                    best = v;
+                    if (first) bestMove = moves[i].m;
+                }
+                beta = std::min(beta, v);
+                if (alpha >= beta) goto done;
+            }
+            {
+                Move b = bmom(cur);
+                if (!b) break;
+                cur.do_move(b);
+            }
+            first = false;
+        }
+        if (best == VALUE_INFINITE) {  // no opponent could move: continue with the root player's turn
+            keys.push_back(cur.board_key());
+            Value v = search(cur, depth - 1, ply + 1, alpha, beta);
+            keys.pop_back();
+            return v;
+        }
+    done:
+        Bound b = best <= alphaOrig ? BOUND_UPPER : best < betaOrig ? BOUND_EXACT : BOUND_LOWER;
         TT.store(tte, pos.key(), best, b, depth, bestMove);
         return best;
     }

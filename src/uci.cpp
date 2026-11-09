@@ -276,6 +276,8 @@ static void cmd_setoption(std::istringstream& is) {
     if (name == "Hash") {
         HashMB = std::max(1, std::atoi(value.c_str()));
         TT.resize(HashMB);
+    } else if (name == "SearchMode") {
+        if (!parse_mode(value, SOpts.mode)) std::cout << "info string unknown SearchMode " << value << std::endl;
     } else if (name == "MoveOverhead")
         SOpts.moveOverhead = std::atoi(value.c_str());
     else
@@ -317,6 +319,7 @@ void uci_loop() {
         if (cmd == "uci") {
             std::cout << "id name FFA-Engine 0.1\nid author Anurag-Baundwal\n"
                       << "option name Hash type spin default 16 min 1 max 4096\n"
+                      << "option name SearchMode type combo default brs+ var brs+ var paranoid\n"
                       << "option name MoveOverhead type spin default 30 min 0 max 5000\n"
                       << "uciok" << std::endl;
         } else if (cmd == "ucinewgame") {
