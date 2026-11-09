@@ -418,6 +418,7 @@ struct Searcher {
         if (!pos.is_alive(root)) return evaluate(pos, root);  // the root player is out: nothing left to decide
         if (Value cv; claim_value(pos, cv)) return cv;
         if (depth <= 0 || ply >= MAX_PLY - 2) return qsearch(pos, ply, alpha, beta, 0);
+        if (ply == 1) return full_layer(pos, depth, ply, alpha, beta, 3);
         nodes++;
         if (check_stop()) return 0;
 
@@ -465,6 +466,50 @@ struct Searcher {
             Value v = search(cur, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             return v;
+        }
+        return best;
+    }
+
+    // The first opponent layer (right after the root move) is searched in full, paranoid style: every
+    // opponent's turn is a MIN node over its moves (with opponent-relevance pruning), so combinations of two
+    // or three opponents (one sets up, another captures or mates) are seen where accuracy matters most.
+    // turnsLeft = opponent turns left in this layer; then the root player's turn follows (one depth unit).
+    Value full_layer(const Position& pos, int depth, int ply, Value alpha, Value beta, int turnsLeft) {
+        if (pos.game_over()) return terminal_value(pos, root);
+        if (Value cv; claim_value(pos, cv)) return cv;
+        if (pos.side_to_move() == root || turnsLeft <= 0) return search(pos, depth - 1, ply, alpha, beta);
+        if (ply >= MAX_PLY - 2) return qsearch(pos, ply, alpha, beta, 0);
+        nodes++;
+        if (check_stop()) return 0;
+
+        if (!pos.is_alive(pos.side_to_move())) {  // a zombie's turn: a pass
+            Position child = pos;
+            child.do_pass();
+            keys.push_back(child.board_key());
+            Value v = full_layer(child, depth, ply + 1, alpha, beta, turnsLeft - 1);
+            keys.pop_back();
+            return v;
+        }
+        ScoredMove moves[MAX_MOVES];
+        int        n = ordered_moves(pos, moves, false, Move::none());
+        if (n == 0) return evaluate(pos, root);
+        const bool inCheck    = pos.in_check(pos.side_to_move());
+        int        irrelevant = 0;
+        Value      best       = VALUE_INFINITE;
+        for (int i = 0; i < n; ++i) {
+            if (!inCheck && !relevant_to_root(pos, moves[i].m) && irrelevant++ >= 1) continue;
+            Position child = pos;
+            child.do_move(moves[i].m);
+            keys.push_back(child.board_key());
+            Value v = full_layer(child, depth, ply + 1, alpha, beta, turnsLeft - 1);
+            keys.pop_back();
+            if (stopped) return 0;
+            best = std::min(best, v);
+            beta = std::min(beta, v);
+            if (alpha >= beta) {
+                update_quiet(pos, moves[i].m, depth);
+                break;
+            }
         }
         return best;
     }
