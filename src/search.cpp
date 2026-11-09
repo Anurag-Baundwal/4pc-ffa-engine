@@ -138,6 +138,27 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
+    // Does an opponent's move touch the root player? Captures of the root's pieces or of a king, en passant,
+    // promotions, attacks on the root's pieces or king zone from the destination, a piece leaving a line
+    // through the root's king (possible discovered attack), or a piece escaping the root's attack. Everything
+    // else ("Green pushes a pawn on the far side") is mostly skipped in BRS+ opponent layers.
+    bool relevant_to_root(const Position& pos, Move m) const {
+        const Color  us = pos.side_to_move();
+        const Square from = m.from_sq(), to = m.to_sq();
+        const Piece  victim = pos.piece_on(to);
+        if (victim != NO_PIECE && (color_of(victim) == root || type_of(victim) == KING)) return true;
+        if (m.type_of() == EN_PASSANT || m.is_promotion()) return true;
+        const Square rk      = pos.king_square(root);
+        Bitboard     targets = pos.pieces(root);
+        if (rk != SQ_NONE) targets |= PseudoAttacks[KING][rk] | square_bb(rk);
+        const Piece    pc  = pos.piece_on(from);
+        const Bitboard occ = (pos.pieces() ^ from) | to;
+        Bitboard       att = type_of(pc) == PAWN ? PawnAttacks[us][to] : attacks_bb(type_of(pc), to, occ);
+        if (att & targets) return true;
+        if (rk != SQ_NONE && PseudoAttacks[QUEEN][rk].test(from)) return true;
+        return bool(pos.attackers_to(from, pos.pieces()) & pos.pieces(root));
+    }
+
     // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
     // passes 1,000,000).
     void update_quiet(const Position& pos, Move m, int depth) {
@@ -347,8 +368,13 @@ struct Searcher {
                 continue;
             }
             ScoredMove moves[MAX_MOVES];
-            int        n = ordered_moves(cur, moves, false, Move::none());
+            int        n          = ordered_moves(cur, moves, false, Move::none());
+            const bool inCheck    = cur.in_check(cur.side_to_move());
+            int        irrelevant = 0;
             for (int i = 0; i < n; ++i) {
+                // Opponent-relevance pruning: of this opponent's moves that don't touch the root player, only
+                // the first (in move order) is searched, unless the opponent is in check.
+                if (!inCheck && !relevant_to_root(cur, moves[i].m) && irrelevant++ >= 1) continue;
                 Position child = cur;
                 child.do_move(moves[i].m);
                 // the remaining opponents of this layer play their BMOM
