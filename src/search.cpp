@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -41,9 +42,20 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// History heuristic: for each player, how often (weighted by depth^2) a quiet move from one square to
-// another caused a cutoff. Kept between searches; cleared by search_clear().
+// History heuristic, stockfish_4pc's mainHistory update: for each player, how well a quiet move from one
+// square to another did as the best move (bonus) or as a quiet move searched without being best (malus),
+// with a bounded update; in a BRS+ layer, the best move's player and that player's other quiet moves.
+// Kept between searches, aged by 820/1024 at the start of each; cleared by search_clear().
 int History[COLOR_NB][SQUARE_NB][SQUARE_NB];
+
+// stockfish_4pc's history update (StatsEntry::operator<< in its history.h): the bonus is clamped to
+// +-HistoryMax and the entry moves by bonus - entry * |bonus| / HistoryMax, so it never leaves that range.
+constexpr int HistoryMax = 7183;
+
+inline void history_update(int& h, int bonus) {
+    const int b = std::clamp(bonus, -HistoryMax, HistoryMax);
+    h += b - h * std::abs(b) / HistoryMax;
+}
 
 struct ScoredMove {
     Move m;
@@ -138,16 +150,23 @@ struct Searcher {
         return bestCap ? bestCap : bestQuiet ? bestQuiet : list[0];
     }
 
-    // A quiet move caused a cutoff: its history grows by depth^2 (all history is halved when an entry
-    // passes 1,000,000).
-    void update_quiet(const Position& pos, Move m, int depth) {
-        if (pos.is_capture(m) || m.is_promotion()) return;
-        int& h = History[pos.side_to_move()][m.from_sq()][m.to_sq()];
-        h += depth * depth;
-        if (h > 1000000)
-            for (auto& a : History)
-                for (auto& b : a)
-                    for (auto& x : b) x /= 2;
+    // The best move (a cutoff, or the move that raised alpha / lowered beta) is quiet: it gets
+    // stockfish_4pc's bonus min(128 depth - 77, 1529) * 2 and the other quiet moves its player searched get
+    // the malus min(882 depth - 204, 2122) * 2 * 1113/1024, shrinking by 977/1024 per move
+    // (update_all_stats). A capture as best move updates nothing here (stockfish_4pc has a capture history).
+    void update_quiet(const Position& pos, Move best, int depth, const Move* quiets, int nq) {
+        if (pos.is_capture(best) || best.is_promotion()) return;
+        reward(pos.side_to_move(), best, depth, quiets, nq);
+    }
+
+    void reward(Color c, Move best, int depth, const Move* quiets, int nq) {
+        auto& H = History[c];
+        history_update(H[best.from_sq()][best.to_sq()], std::min(128 * depth - 77, 1529) * 2);
+        int malus = std::min(882 * depth - 204, 2122) * 2 * 1113 / 1024;
+        for (int i = 0; i < nq; ++i) {
+            malus = malus * 977 / 1024;
+            history_update(H[quiets[i].from_sq()][quiets[i].to_sq()], -malus);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -301,6 +320,9 @@ struct Searcher {
 
         const bool maxNode = us == root;
         Value      best    = maxNode ? -VALUE_INFINITE : VALUE_INFINITE;
+        Move       bestMove = Move::none();  // the move that last raised alpha / lowered beta
+        Move       quiets[32];  // quiet moves searched and not best (stockfish_4pc keeps 32)
+        int        nq = 0;
         for (int i = 0; i < n; ++i) {
             const Move m     = moves[i].m;
             Position   child = pos;
@@ -309,6 +331,7 @@ struct Searcher {
             Value v = next_node(child, depth - 1, ply + 1, alpha, beta);
             keys.pop_back();
             if (stopped) return 0;
+            if (maxNode ? v > alpha : v < beta) bestMove = m;
             if (maxNode ? v > best : v < best) {
                 best = v;
                 if (ply == 0) {
@@ -320,11 +343,11 @@ struct Searcher {
                 alpha = std::max(alpha, v);
             else
                 beta = std::min(beta, v);
-            if (alpha >= beta) {
-                update_quiet(pos, m, depth);
-                break;
-            }
+            if (alpha >= beta) break;
+            if (m != bestMove && !pos.is_capture(m) && !m.is_promotion() && nq < 32) quiets[nq++] = m;
         }
+        // As in stockfish_4pc, the best move's history is updated whenever there is one, not only on cutoffs.
+        if (bestMove) update_quiet(pos, bestMove, depth, quiets, nq);
         return best;
     }
 
@@ -339,8 +362,13 @@ struct Searcher {
         nodes++;
         if (check_stop()) return 0;
 
-        Value    best = VALUE_INFINITE;
-        Position cur  = pos;  // the position before the current opponent's turn
+        Value    best      = VALUE_INFINITE;
+        Move     bestMove  = Move::none();  // the opponent move that last lowered beta, and its player
+        Color    bestBy    = NO_COLOR;
+        bool     bestQuiet = false;
+        Move     bestQuiets[32];  // the other quiet moves bestBy searched in that turn
+        int      bestNq = 0;
+        Position cur       = pos;  // the position before the current opponent's turn
         for (int turn = 0; turn < 4 && !cur.game_over() && cur.side_to_move() != root; ++turn) {
             if (!cur.is_alive(cur.side_to_move())) {
                 cur.do_pass();
@@ -348,9 +376,13 @@ struct Searcher {
             }
             ScoredMove moves[MAX_MOVES];
             int        n = ordered_moves(cur, moves, false, Move::none());
+            Move       quiets[32];  // this opponent's quiet moves searched and not best
+            int        nq       = 0;
+            bool       bestHere = false;
             for (int i = 0; i < n; ++i) {
-                Position child = cur;
-                child.do_move(moves[i].m);
+                const Move m     = moves[i].m;
+                Position   child = cur;
+                child.do_move(m);
                 // the remaining opponents of this layer play their BMOM
                 for (int k = 0; k < 4 && !child.game_over() && child.side_to_move() != root; ++k) {
                     if (!child.is_alive(child.side_to_move()))
@@ -362,12 +394,24 @@ struct Searcher {
                 Value v = search(child, depth - 1, ply + 1, alpha, beta);
                 keys.pop_back();
                 if (stopped) return 0;
+                if (v < beta) {
+                    bestMove  = m;
+                    bestBy    = cur.side_to_move();
+                    bestQuiet = !cur.is_capture(m) && !m.is_promotion();
+                    bestHere  = true;
+                }
                 best = std::min(best, v);
                 beta = std::min(beta, v);
                 if (alpha >= beta) {
-                    update_quiet(cur, moves[i].m, depth);
-                    return best;
+                    std::copy(quiets, quiets + nq, bestQuiets);
+                    bestNq = nq;
+                    goto update;
                 }
+                if (m != bestMove && !cur.is_capture(m) && !m.is_promotion() && nq < 32) quiets[nq++] = m;
+            }
+            if (bestHere) {
+                std::copy(quiets, quiets + nq, bestQuiets);
+                bestNq = nq;
             }
             Move b = bmom(cur);
             if (!b) break;
@@ -379,6 +423,8 @@ struct Searcher {
             keys.pop_back();
             return v;
         }
+    update:
+        if (bestMove && bestQuiet) reward(bestBy, bestMove, depth, bestQuiets, bestNq);
         return best;
     }
 };
@@ -397,6 +443,10 @@ SearchResult think(const Game& game, const SearchLimits& limits, std::atomic<boo
     s->stopFlag = &stop;
     s->start    = Clock::now();
     s->keys     = game.history;
+    // stockfish_4pc ages the history at the start of every search.
+    for (auto& a : History)
+        for (auto& b : a)
+            for (auto& x : b) x = x * 820 / 1024;
 
     if (pos.resign_wins(s->root)) {
         res.resign = true;
