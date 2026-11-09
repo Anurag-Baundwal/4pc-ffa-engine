@@ -152,6 +152,8 @@ struct Searcher {
         Bitboard     targets = pos.pieces(root);
         if (rk != SQ_NONE) targets |= PseudoAttacks[KING][rk] | square_bb(rk);
         const Piece    pc  = pos.piece_on(from);
+        // a pawn reaching the rank before promotion: it promotes next turn
+        if (type_of(pc) == PAWN && relative_rank(us, to) == Rules.promotionRelRank - 1) return true;
         const Bitboard occ = (pos.pieces() ^ from) | to;
         Bitboard       att = type_of(pc) == PAWN ? PawnAttacks[us][to] : attacks_bb(type_of(pc), to, occ);
         if (att & targets) return true;
