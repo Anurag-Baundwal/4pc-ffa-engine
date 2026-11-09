@@ -255,6 +255,7 @@ struct Searcher {
         nodes++;
         if (check_stop()) return 0;
         if (pos.game_over()) return terminal_value(pos, root);
+        if (!pos.is_alive(root)) return evaluate(pos, root);  // the root player is out: nothing left to decide
         if (Value cv; claim_value(pos, cv)) return cv;
         const Color us = pos.side_to_move();
         if (!pos.is_alive(us)) {  // a zombie's turn: a pass
@@ -357,6 +358,7 @@ struct Searcher {
     // a pass. At depth 0 the quiescence search takes over.
     Value search(const Position& pos, int depth, int ply, Value alpha, Value beta) {
         if (pos.game_over()) return terminal_value(pos, root);
+        if (!pos.is_alive(root)) return evaluate(pos, root);  // the root player is out: nothing left to decide
         if (Value cv; claim_value(pos, cv)) return cv;
         if (ply > 0 && is_repetition(pos)) return draw_value(pos);
         if (depth <= 0 || ply >= MAX_PLY - 1) return qsearch(pos, ply, alpha, beta, 0);
@@ -413,6 +415,7 @@ struct Searcher {
     // move again. It counts as one depth unit.
     Value brs_layer(const Position& pos, int depth, int ply, Value alpha, Value beta) {
         if (pos.game_over()) return terminal_value(pos, root);
+        if (!pos.is_alive(root)) return evaluate(pos, root);  // the root player is out: nothing left to decide
         if (Value cv; claim_value(pos, cv)) return cv;
         if (depth <= 0 || ply >= MAX_PLY - 2) return qsearch(pos, ply, alpha, beta, 0);
         nodes++;
